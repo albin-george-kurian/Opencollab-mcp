@@ -9,10 +9,13 @@ Set TRANSPORT and optionally PORT=8000 for remote deployment.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 
 from mcp.server.mcpserver import MCPServer
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
 
 from .constants import __version__
 from .tools import discovery, evaluation, issues
@@ -33,6 +36,11 @@ def build_server() -> MCPServer:
     discovery.register(mcp)
     evaluation.register(mcp)
     issues.register(mcp)
+
+    @mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
+    async def health_check(_: Request) -> PlainTextResponse:
+        return PlainTextResponse("ok")
+
     return mcp
 
 
@@ -40,7 +48,19 @@ def build_server() -> MCPServer:
 mcp = build_server()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="opencollab-mcp",
+        description="OpenCollab MCP Server — AI-powered open source contribution matchmaker.",
+    )
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    parser.parse_known_args(argv)
+
     _configure_logging()
     transport = os.environ.get("TRANSPORT", "stdio").lower()
     logger = logging.getLogger("opencollab_mcp")

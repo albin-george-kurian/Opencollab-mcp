@@ -244,3 +244,68 @@ async def test_closed_client_is_replaced(monkeypatch):
     await client.aclose()
 
     assert github_client._get_client() is not client
+
+
+@pytest.mark.asyncio
+async def test_cache_expires_after_ttl(monkeypatch):
+    """Cached entries should expire after TTL, forcing a fresh network call."""
+    call_count = {"n": 0}
+
+    def _counting_handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        return httpx.Response(200, json={"login": "cached"})
+
+    transport = httpx.MockTransport(_counting_handler)
+    real_async_client = httpx.AsyncClient
+
+    def _patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _patched)
+    github_client.clear_cache()
+
+    # Fake clock: we control time instead of waiting 5 minutes
+    fake_now = {"t": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: fake_now["t"])
+
+    # First call: hits network
+    await github_client.github_get("/users/expiring")
+    assert call_count["n"] == 1
+
+    # Second call immediately: cache hit, no new network request
+    await github_client.github_get("/users/expiring")
+    assert call_count["n"] == 1, "should be served from cache"
+
+    # Fast-forward past TTL
+    fake_now["t"] += github_client.CACHE_TTL_SECONDS + 1
+
+    # Third call: cache expired, hits network again
+    await github_client.github_get("/users/expiring")
+    assert call_count["n"] == 2, "cache should have expired and re-fetched"
+
+
+def test_cache_evicts_oldest_when_full(monkeypatch):
+    """When cache exceeds max entries, the oldest-expiry entry is evicted."""
+    # Shrink the cap so we can fill it with 3 entries
+    monkeypatch.setattr(github_client, "CACHE_MAX_ENTRIES", 2)
+    github_client.clear_cache()
+
+    # Use a fake clock so each entry gets a distinct expiry time
+    fake_now = {"t": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: fake_now["t"])
+
+    # Insert 3 entries; the 3rd triggers eviction of the earliest-expiry one
+    fake_now["t"] = 0.0
+    github_client._cache_set("key1", "value1")  # expires at 0 + 300 = 300
+
+    fake_now["t"] = 10.0
+    github_client._cache_set("key2", "value2")  # expires at 10 + 300 = 310
+
+    fake_now["t"] = 20.0
+    github_client._cache_set("key3", "value3")  # expires at 20 + 300 = 320
+
+    # key1 has the earliest expiry (300), should be evicted
+    assert "key1" not in github_client._cache, "oldest-expiry entry should be evicted"
+    assert "key2" in github_client._cache
+    assert "key3" in github_client._cache
